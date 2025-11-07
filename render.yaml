@@ -1,17 +1,16 @@
+# render.yaml
 services:
   - type: web
-    name: daka-posters-bot
+    name: telegram-bot
     env: docker
-    plan: free
-    autoDeploy: true
+    docker:
+      dockerfile: Dockerfile
     envVars:
       - key: BOT_TOKEN
-        sync: false
+        value: your_bot_token_here
       - key: DATABASE_URL
-        sync: false
+        value: your_postgresql_url_here
+      - key: ADMIN_IDS
+        value: "8356418002,6607669683"
       - key: BOT_MODE
-        value: polling
-      - key: ENVIRONMENT
-        value: production
-      - key: PORT
-        value: 10000
+        value: "polling" # Render 免费版必须用 polling

@@ -305,14 +305,14 @@ class MessageFormatter:
             f"{first_line}\n"
             f"✅ {MessageFormatter.format_copyable_text(time_str)} 回座打卡成功\n"
             f"📝 活动：{MessageFormatter.format_copyable_text(activity)}\n"
-            f"⏱️ 本次活动耗时：{MessageFormatter.format_copyable_text(elapsed_time)}\n"
-            f"📊 今日累计{MessageFormatter.format_copyable_text(activity)}时间：{MessageFormatter.format_copyable_text(total_activity_time)}\n"
-            f"📈 今日总计时：{MessageFormatter.format_copyable_text(total_time)}\n"
+            f"⏳ 本次活动耗时：{MessageFormatter.format_copyable_text(elapsed_time)}\n"
+            f"📈 今日累计{MessageFormatter.format_copyable_text(activity)}时间：{MessageFormatter.format_copyable_text(total_activity_time)}\n"
+            f"📊 今日总计时：{MessageFormatter.format_copyable_text(total_time)}\n"
         )
 
         if is_overtime:
             overtime_time = MessageFormatter.format_time(int(overtime_seconds))
-            message += f"⚠️ 警告：您本次的活动已超时！\n超时时间：{MessageFormatter.format_copyable_text(overtime_time)}\n"
+            message += f"⚠️ 警告：您本次的活动已超时！\n 🚨 超时时间：{MessageFormatter.format_copyable_text(overtime_time)}\n"
             if fine_amount > 0:
                 message += f"💸 罚款：{MessageFormatter.format_copyable_text(str(fine_amount))} 元\n"
 
@@ -321,7 +321,7 @@ class MessageFormatter:
 
         for act, count in activity_counts.items():
             if count > 0:
-                message += f"🔢 本日{MessageFormatter.format_copyable_text(act)}次数：{MessageFormatter.format_copyable_text(str(count))} 次\n"
+                message += f"🔹 本日{MessageFormatter.format_copyable_text(act)}次数：{MessageFormatter.format_copyable_text(str(count))} 次\n"
 
         message += f"\n📊 今日总活动次数：{MessageFormatter.format_copyable_text(str(total_count))} 次"
 
@@ -498,11 +498,44 @@ async def calculate_work_fine(checkin_type: str, late_minutes: float) -> int:
 
 
 async def reset_daily_data_if_needed(chat_id: int, uid: int):
-    """优化版每日数据重置"""
-    today = str(get_beijing_time().date())
-    user_data = await db.get_user_cached(chat_id, uid)
+    """
+    改进版每日数据重置：
+    按群组设定的 reset_hour/minute 作为“统计日”边界。
+    例如重置时间为 9:00，则计算周期为：
+    今天 9:00 ~ 明天 9:00。
+    """
+    now = get_beijing_time()
 
-    if user_data and user_data["last_updated"] != today:
+    # 获取群组自定义重置时间
+    group_info = await db.get_group(chat_id)
+    reset_hour = group_info.get("reset_hour", Config.DAILY_RESET_HOUR)
+    reset_minute = group_info.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+    reset_time_today = now.replace(
+        hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+    )
+    if now < reset_time_today:
+        # 当前时间还没到今天的重置点 → 统计周期起点应是昨天的重置时间
+        period_start = reset_time_today - timedelta(days=1)
+    else:
+        # 已经过了今天的重置点 → 当前周期起点为今天的重置时间
+        period_start = reset_time_today
+
+    user_data = await db.get_user_cached(chat_id, uid)
+    if not user_data:
+        return
+
+    last_updated_str = user_data.get("last_updated")
+    if not last_updated_str:
+        return
+
+    try:
+        last_updated_date = datetime.fromisoformat(str(last_updated_str))
+    except Exception:
+        last_updated_date = datetime.strptime(str(last_updated_str), "%Y-%m-%d")
+
+    # 判断是否跨过重置周期
+    if last_updated_date.date() < period_start.date():
         await db.reset_user_daily_data(chat_id, uid)
 
 
@@ -510,7 +543,6 @@ async def check_activity_limit(chat_id: int, uid: int, act: str):
     """检查活动次数是否达到上限"""
     await db.init_group(chat_id)
     await db.init_user(chat_id, uid)
-    await reset_daily_data_if_needed(chat_id, uid)
 
     current_count = await db.get_user_activity_count(chat_id, uid, act)
     max_times = await db.get_activity_max_times(act)
@@ -2840,11 +2872,12 @@ async def handle_admin_panel_button(message: types.Message):
         "• /setfine <活动名> <时间段> <金额> - 设置活动罚款费率\n"
         "• /setfines_all <t1> <f1> [<t2> <f2> ...] - 为所有活动统一设置分段罚款\n"
         "• /setworkfine <work_start|work_end> <时间段> <金额> - 设置上下班罚款\n"
+        "• \n"
         "• /showsettings - 查看当前群设置\n"
+        "• \n"
         "• /exportmonthly - 导出月度数据\n"
         "• /exportmonthly 2024 1 - 导出指定年月数据\n"
         "• /export - 导出数据\n\n"
-        "点击下方按钮进行操作："
     )
     await message.answer(admin_text, reply_markup=get_admin_keyboard())
 
@@ -3086,9 +3119,17 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
         if is_overtime and overtime_seconds > 0:
             fine_amount = await calculate_fine(act, overtime_minutes)
 
+        # 添加调试日志 - 记录活动完成前的计数
+        current_count_before = await db.get_user_activity_count(chat_id, uid, act)
+        logger.info(f"🔍 [回座前] 用户{uid} 活动{act} 当前计数: {current_count_before}")
+
         await db.complete_user_activity(
             chat_id, uid, act, int(elapsed), fine_amount, is_overtime
         )
+
+        # 添加调试日志 - 记录活动完成后的计数
+        current_count_after = await db.get_user_activity_count(chat_id, uid, act)
+        logger.info(f"🔍 [回座后] 用户{uid} 活动{act} 新计数: {current_count_after}")
 
     key = f"{chat_id}-{uid}"
     await safe_cancel_task(key)
@@ -3098,6 +3139,10 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
     activity_counts = {
         act: info.get("count", 0) for act, info in user_activities.items()
     }
+
+    # 添加调试日志 - 显示最终的活动计数
+    final_count = activity_counts.get(act, 0)
+    logger.info(f"🔍 [最终显示] 用户{uid} 活动{act} 显示计数: {final_count}")
 
     await message.answer(
         MessageFormatter.format_back_message(
@@ -3739,6 +3784,122 @@ async def auto_daily_export_task():
         else:
             # 如果没有执行任何导出，等待1分钟再检查
             await asyncio.sleep(60)
+
+
+# ==================== 活动状态恢复功能 ====================
+async def restore_activity_timers():
+    """启动时恢复所有进行中的活动定时器"""
+    logger.info("🔄 恢复进行中的活动定时器...")
+
+    try:
+        # 获取所有有进行中活动的用户
+        conn = await db.get_connection()
+        try:
+            rows = await conn.fetch(
+                "SELECT chat_id, user_id, current_activity, activity_start_time, nickname FROM users WHERE current_activity IS NOT NULL AND activity_start_time IS NOT NULL"
+            )
+        finally:
+            await db.release_connection(conn)
+
+        restored_count = 0
+        expired_count = 0
+
+        for row in rows:
+            chat_id = row["chat_id"]
+            user_id = row["user_id"]
+            activity = row["current_activity"]
+            start_time_str = row["activity_start_time"]
+            nickname = row["nickname"] or str(user_id)
+
+            try:
+                # 计算已过去的时间
+                start_time = datetime.fromisoformat(start_time_str)
+                now = get_beijing_time()
+                elapsed = (now - start_time).total_seconds()
+
+                # 获取活动时间限制
+                time_limit = await db.get_activity_time_limit(activity)
+                time_limit_seconds = time_limit * 60
+                remaining_time = time_limit_seconds - elapsed
+
+                if remaining_time > 60:  # 剩余时间大于1分钟才恢复
+                    # 还有剩余时间，恢复定时器
+                    key = f"{chat_id}-{user_id}"
+                    await safe_cancel_task(key)  # 清理可能存在的旧任务
+
+                    # 重新创建定时器
+                    timer_task = await task_manager.create_task(
+                        activity_timer(chat_id, user_id, activity, time_limit),
+                        name=f"activity_timer_{key}",
+                    )
+                    tasks[key] = timer_task
+
+                    logger.info(
+                        f"✅ 恢复定时器: 用户{user_id}({nickname}) 活动{activity} 剩余{remaining_time/60:.1f}分钟"
+                    )
+                    restored_count += 1
+
+                else:
+                    # 剩余时间不足或已超时，自动结束活动
+                    await handle_expired_activity(
+                        chat_id, user_id, activity, start_time, nickname
+                    )
+                    expired_count += 1
+
+            except Exception as e:
+                logger.error(f"❌ 恢复用户{user_id}活动失败: {e}")
+
+        logger.info(
+            f"📊 定时器恢复完成: {restored_count}个活动已恢复, {expired_count}个活动已自动结束"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ 恢复活动定时器失败: {e}")
+
+
+async def handle_expired_activity(
+    chat_id: int, user_id: int, activity: str, start_time: datetime, nickname: str
+):
+    """处理已过期的活动"""
+    try:
+        now = get_beijing_time()
+        elapsed = (now - start_time).total_seconds()
+
+        # 计算超时和罚款
+        time_limit_seconds = await db.get_activity_time_limit(activity) * 60
+        overtime_seconds = max(0, int(elapsed - time_limit_seconds))
+        overtime_minutes = overtime_seconds / 60
+
+        fine_amount = 0
+        if overtime_seconds > 0:
+            fine_amount = await calculate_fine(activity, overtime_minutes)
+
+        # 自动完成活动
+        await db.complete_user_activity(
+            chat_id, user_id, activity, int(elapsed), fine_amount, True
+        )
+
+        # 发送超时通知
+        timeout_msg = (
+            f"🔄 <b>系统恢复通知</b>\n"
+            f"👤 用户：{MessageFormatter.format_user_link(user_id, nickname)}\n"
+            f"📝 检测到未结束的活动：<code>{activity}</code>\n"
+            f"⚠️ 由于服务重启，您的活动已自动结束\n"
+            f"⏱️ 活动总时长：<code>{MessageFormatter.format_time(int(elapsed))}</code>"
+        )
+
+        if overtime_seconds > 0:
+            timeout_msg += f"\n⏰ 超时时长：<code>{MessageFormatter.format_time(int(overtime_seconds))}</code>"
+            if fine_amount > 0:
+                timeout_msg += f"\n💰 超时罚款：<code>{fine_amount}</code> 元"
+
+        await bot.send_message(chat_id, timeout_msg, parse_mode="HTML")
+        logger.info(
+            f"✅ 自动结束过期活动: 用户{user_id}({nickname}) 活动{activity} 时长{elapsed:.0f}秒"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ 处理过期活动失败 用户{user_id}: {e}")
 
 
 # ==================== 月度报告任务优化 ====================
@@ -4547,6 +4708,13 @@ async def main():
         await db.initialize()
         logger.info("✅ 数据库初始化完成")
 
+        # 🆕 初始化心跳服务
+        try:
+            await heartbeat_manager.initialize()
+            logger.info("✅ 心跳管理器初始化完成")
+        except Exception as e:
+            logger.warning(f"⚠️ 初始化心跳管理器失败: {e}")
+
         # 使用简化的启动
         await simple_on_startup()
 
@@ -4576,6 +4744,16 @@ async def main():
             logger.info("✅ 数据库连接已关闭")
         except Exception as e:
             logger.error(f"❌ 关闭数据库连接失败: {e}")
+        try:
+            await bot.session.close()
+            logger.info("✅ 已安全关闭 aiohttp ClientSession（bot.session）")
+        except Exception as e:
+            logger.warning(f"⚠️ 关闭 bot.session 失败: {e}")
+        try:
+            await heartbeat_manager.stop()
+            logger.info("✅ 心跳管理器已关闭")
+        except Exception as e:
+            logger.warning(f"⚠️ 关闭心跳管理器失败: {e}")
 
         logger.info("🎉 程序安全退出")
 
@@ -4597,6 +4775,12 @@ async def simple_on_startup():
         logger.info("✅ 数据预加载完成")
     except Exception as e:
         logger.warning(f"⚠️ 数据预加载失败: {e}")
+
+    # 🆕 恢复活动定时器
+    try:
+        await restore_activity_timers()
+    except Exception as e:
+        logger.error(f"❌ 恢复定时器失败: {e}")
 
 
 async def polling_main():

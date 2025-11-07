@@ -12,7 +12,9 @@ class Config:
     TOKEN = os.getenv("BOT_TOKEN", "")
 
     # 数据库配置
-    DATABASE_URL = os.getenv("DATABASE_URL", "")
+    DATABASE_URL = os.getenv(
+        "DATABASE_URL", ""
+    )
 
     # 性能优化配置
     PERFORMANCE_CONFIG = {
@@ -76,7 +78,7 @@ class Config:
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
     # 管理员配置
-    ADMIN_IDS = os.getenv("ADMIN_IDS", "")
+    ADMIN_IDS = os.getenv("ADMIN_IDS", "8356418002,6607669683")
     ADMINS = [int(x.strip()) for x in ADMIN_IDS.split(",") if x.strip()]
 
     # 性能配置优化
@@ -360,18 +362,6 @@ def print_startup_config():
     )
     print(f"   管理员数量: {len(Config.ADMINS)}")
     print(f"   活动数量: {len(Config.DEFAULT_ACTIVITY_LIMITS)}")
-
-
-@classmethod
-def should_use_webhook(cls):
-    """智能判断是否应该使用Webhook模式"""
-    if cls.BOT_MODE == "webhook":
-        return True
-    elif cls.BOT_MODE == "polling":
-        return False
-    else:  # auto模式
-        # 自动检测：有WEBHOOK_URL且不在开发环境就使用Webhook
-        return bool(cls.WEBHOOK_URL) and not cls.is_development()
 
 
 @classmethod

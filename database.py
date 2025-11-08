@@ -2,7 +2,7 @@
 import logging
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Dict, Any, List, Optional
 from config import Config
 import asyncpg
@@ -903,6 +903,26 @@ class PostgreSQLDatabase:
             )
             return {row["time_segment"]: row["fine_amount"] for row in rows}
 
+    async def update_work_fine_rate(
+        self, checkin_type: str, time_segment: str, fine_amount: int
+    ):
+        """插入或更新上下班罚款规则"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO work_fine_configs (checkin_type, time_segment, fine_amount)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (checkin_type, time_segment)
+                DO UPDATE SET fine_amount = EXCLUDED.fine_amount
+                """,
+                checkin_type,
+                time_segment,
+                fine_amount,
+            )
+            logger.info(
+                f"✅ 已更新罚款配置: 类型={checkin_type}, 阈值={time_segment}, 金额={fine_amount}"
+            )
+
     async def update_work_fine_config(
         self, checkin_type: str, time_segment: str, fine_amount: int
     ):
@@ -921,6 +941,15 @@ class PostgreSQLDatabase:
                 time_segment,
                 fine_amount,
             )
+
+    async def clear_work_fine_rates(self, checkin_type: str):
+        """清空指定类型的上下班罚款配置"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM work_fine_configs WHERE checkin_type = $1",
+                checkin_type,
+            )
+            logger.info(f"🧹 已清空 {checkin_type} 的旧罚款配置")
 
     # ========== 推送设置操作 ==========
     async def get_push_settings(self) -> Dict:
@@ -995,11 +1024,40 @@ class PostgreSQLDatabase:
 
             return result
 
-    async def get_all_groups(self) -> List[int]:
-        """获取所有群组ID"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT chat_id FROM groups")
-            return [row["chat_id"] for row in rows]
+    async def get_all_groups(self, retries: int = 3, delay: float = 2.0) -> List[int]:
+        """
+        获取所有群组ID（带超时与自愈机制）
+        """
+        for attempt in range(1, retries + 1):
+            try:
+                async with self.pool.acquire() as conn:
+                    # ✅ 增加超时保护（最多等待10秒）
+                    rows = await asyncio.wait_for(
+                        conn.fetch("SELECT chat_id FROM groups"), timeout=10
+                    )
+                    return [row["chat_id"] for row in rows]
+
+            except (
+                asyncpg.InterfaceError,
+                asyncpg.PostgresConnectionError,
+                asyncio.TimeoutError,
+            ) as e:
+                logger.warning(f"⚠️ 第 {attempt} 次获取群组失败: {e}")
+
+                # ✅ 使用新的重连机制替换旧的连接池重置
+                reconnect_success = await self.reconnect()
+
+                if reconnect_success and attempt < retries:
+                    sleep_time = delay * attempt  # 指数退避
+                    logger.info(f"⏳ {sleep_time:.1f}s 后重试（第 {attempt} 次）...")
+                    await asyncio.sleep(sleep_time)
+                else:
+                    logger.error("❌ 重试次数耗尽或重连失败，放弃操作。")
+                    return []
+
+            except Exception as e:
+                logger.error(f"💥 未知错误（get_all_groups）：{e}")
+                return []
 
     async def get_group_members(self, chat_id: int) -> List[Dict]:
         """获取群组成员"""
@@ -1267,22 +1325,43 @@ class PostgreSQLDatabase:
             return rankings
 
     # ========== 数据清理 ==========
+
     async def cleanup_old_data(self, days: int = 30):
-        """清理旧数据"""
-        cutoff_date = (datetime.now() - timedelta(days=days)).date()
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    "DELETE FROM user_activities WHERE activity_date < $1",
-                    str(cutoff_date),
-                )
-                await conn.execute(
-                    "DELETE FROM work_records WHERE record_date < $1", str(cutoff_date)
-                )
-                await conn.execute(
-                    "DELETE FROM users WHERE last_updated < $1", str(cutoff_date)
-                )
-            logger.info(f"✅ 已清理 {days} 天前的数据")
+        """清理旧数据 - 修复版（防止 str 传入 asyncpg）"""
+        try:
+            cutoff_date = (datetime.now() - timedelta(days=days)).date()
+            logger.info(
+                f"🔄 开始清理 {days} 天前的数据，截止日期: {cutoff_date.isoformat()}"
+            )
+
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    # ✅ 关键修复：传入 cutoff_date（date对象），不再用字符串
+                    await conn.execute(
+                        "DELETE FROM user_activities WHERE activity_date < $1::date",
+                        cutoff_date,
+                    )
+                    await conn.execute(
+                        "DELETE FROM work_records WHERE record_date < $1::date",
+                        cutoff_date,
+                    )
+                    await conn.execute(
+                        "DELETE FROM users WHERE last_updated < $1::date", cutoff_date
+                    )
+
+            logger.info(f"✅ 成功清理超过 {days} 天的数据")
+        except Exception as e:
+            logger.error(f"❌ 清理旧数据失败: {e}")
+            raise
+
+    async def safe_cleanup_old_data(self, days: int = 30) -> bool:
+        """安全清理旧数据 - 不会抛出异常，适合在定时任务中使用"""
+        try:
+            await self.cleanup_old_data(days)
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ 安全清理数据失败（不影响主要功能）: {e}")
+            return False
 
     async def manage_monthly_data(self):
         """月度数据管理"""
@@ -1333,6 +1412,72 @@ class PostgreSQLDatabase:
             return f"{minutes}分{secs}秒"
         else:
             return f"{secs}秒"
+
+    # ========== 健康检查与监控 ==========
+    async def connection_health_check(self) -> bool:
+        """
+        数据库连接层面的健康检查
+        返回: True-连接健康, False-连接异常
+        """
+        if not self.pool:
+            logger.warning("⚠️ 数据库健康检查: 连接池未初始化")
+            return False
+
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.fetchval("SELECT 1")
+                is_healthy = result == 1
+                if not is_healthy:
+                    logger.error("❌ 数据库健康检查: 查询返回异常结果")
+                else:
+                    logger.debug("✅ 数据库健康检查: 连接正常")
+                return is_healthy
+        except Exception as e:
+            logger.error(f"❌ 数据库健康检查失败: {e}")
+            return False
+
+    async def reconnect(self, max_retries: int = 3) -> bool:
+        """
+        重新连接数据库
+        返回: True-成功, False-失败
+        """
+        logger.warning("🔄 尝试重新连接数据库...")
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                # 关闭现有连接池
+                if self.pool:
+                    await self.pool.close()
+                    logger.debug("✅ 旧连接池已关闭")
+
+                # 重置状态
+                self.pool = None
+                self._initialized = False
+                self._cache.clear()
+                self._cache_ttl.clear()
+
+                # 重新初始化
+                await self.initialize()
+
+                # 验证重新连接是否成功
+                if await self.connection_health_check():
+                    logger.info(f"✅ 数据库重连成功 (第{attempt}次尝试)")
+                    return True
+                else:
+                    logger.warning(f"⚠️ 重连后健康检查失败 (第{attempt}次尝试)")
+
+            except Exception as e:
+                logger.error(f"❌ 数据库重连第{attempt}次尝试失败: {e}")
+
+                if attempt < max_retries:
+                    retry_delay = 2**attempt  # 指数退避
+                    logger.info(f"⏳ {retry_delay}秒后重试...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error(f"💥 数据库重连{max_retries}次后彻底失败")
+                    return False
+
+        return False
 
     @staticmethod
     def format_minutes_to_hm(minutes: float) -> str:

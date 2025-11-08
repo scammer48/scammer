@@ -53,7 +53,7 @@ class Config:
     DB_MIN_CONNECTIONS = int(os.getenv("DB_MIN_CONNECTIONS", "2"))
     DB_MAX_CONNECTIONS = int(os.getenv("DB_MAX_CONNECTIONS", "20"))
     DB_CONNECTION_TIMEOUT = int(os.getenv("DB_CONNECTION_TIMEOUT", "30"))
-    DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "3600"))
+    DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))
 
     # 数据库健康检查配置
     DB_HEALTH_CHECK_ENABLED = (

@@ -1,4 +1,4 @@
-# config.py - 完整优化版本
+# config.py - 完整优化版本（确保无遗漏）
 import os
 import sys
 from datetime import timedelta, timezone
@@ -44,14 +44,14 @@ class Config:
             return bool(cls.WEBHOOK_URL) and not cls.is_development()
 
     @classmethod
-    def is_development(cls):
-        """判断是否是开发环境"""
-        return cls.get_environment() == "development"
-
-    @classmethod
     def should_use_polling(cls):
         """智能判断是否应该使用Polling模式"""
         return not cls.should_use_webhook()
+
+    @classmethod
+    def is_development(cls):
+        """判断是否是开发环境"""
+        return cls.get_environment() == "development"
 
     @classmethod
     def get_environment(cls):

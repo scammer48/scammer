@@ -3798,18 +3798,30 @@ async def daily_reset_task():
 
 
 async def auto_daily_export_task():
-    """每天重置前自动导出群组数据（增强版）"""
+    """每天重置前自动导出群组数据（完整修复版本）"""
+    # 添加任务状态跟踪
+    task_cooldown = False
+    
     while True:
         now = get_beijing_time()
+        
+        # 如果处于冷却期，简单休眠后继续
+        if task_cooldown:
+            await asyncio.sleep(300)  # 冷却期休眠5分钟
+            task_cooldown = False
+            continue
+            
         logger.info(f"🕒 自动导出任务运行中，当前时间: {now}")
 
         try:
-            # ✅ 1. 增加超时与重试保护
-            all_groups = await asyncio.wait_for(db.get_all_groups(), timeout=15)
+            # ✅ 修复：使用带超时的 get_all_groups 调用
+            all_groups = await asyncio.wait_for(db.get_all_groups(), timeout=10.0)
+            
             if not all_groups:
                 logger.warning("⚠️ 未获取到任何群组，10秒后重试。")
                 await asyncio.sleep(10)
                 continue
+                
         except asyncio.TimeoutError:
             logger.error("⏰ 数据库查询超时（get_all_groups），将在30秒后重试。")
             await asyncio.sleep(30)
@@ -3823,9 +3835,9 @@ async def auto_daily_export_task():
 
         for chat_id in all_groups:
             try:
-                # ✅ 每个群组独立超时保护（防止单群卡死）
+                # ✅ 修复：为每个群组操作添加超时保护
                 group_data = await asyncio.wait_for(
-                    db.get_group_cached(chat_id), timeout=10
+                    db.get_group_cached(chat_id), timeout=5.0
                 )
                 if not group_data:
                     continue
@@ -3833,35 +3845,38 @@ async def auto_daily_export_task():
                 reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
                 reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-                # 方案1: 23:59固定导出
+                # ✅ 保留原有功能1: 23:59固定导出
                 if now.hour == 23 and now.minute == 59:
                     logger.info(f"📤 23:59自动导出群组 {chat_id} 数据中...")
-                    await asyncio.wait_for(export_and_push_csv(chat_id), timeout=30)
-                    logger.info(f"✅ 群组 {chat_id} 导出成功 (23:59)")
-                    export_executed = True
+                    try:
+                        await asyncio.wait_for(export_and_push_csv(chat_id), timeout=60.0)
+                        logger.info(f"✅ 群组 {chat_id} 导出成功 (23:59)")
+                        export_executed = True
+                    except asyncio.TimeoutError:
+                        logger.warning(f"⏰ 群组 {chat_id} 导出超时，跳过")
 
-                # 方案2: 重置前1分钟导出
+                # ✅ 保留原有功能2: 重置前1分钟导出
                 else:
                     reset_time = now.replace(
                         hour=reset_hour, minute=reset_minute, second=0, microsecond=0
                     )
                     export_time = reset_time - timedelta(minutes=1)
 
-                    if (
-                        now.hour == export_time.hour
-                        and now.minute == export_time.minute
-                    ):
+                    if (now.hour == export_time.hour and now.minute == export_time.minute):
                         logger.info(f"📤 到达重置前导出时间，导出群组 {chat_id} ...")
-                        await asyncio.wait_for(export_and_push_csv(chat_id), timeout=30)
-                        logger.info(f"✅ 群组 {chat_id} 导出成功 (重置前)")
-                        export_executed = True
+                        try:
+                            await asyncio.wait_for(export_and_push_csv(chat_id), timeout=60.0)
+                            logger.info(f"✅ 群组 {chat_id} 导出成功 (重置前)")
+                            export_executed = True
+                        except asyncio.TimeoutError:
+                            logger.warning(f"⏰ 群组 {chat_id} 导出超时，跳过")
 
             except asyncio.TimeoutError:
-                logger.warning(f"⏰ 群组 {chat_id} 导出或查询超时，跳过此群。")
+                logger.warning(f"⏰ 群组 {chat_id} 查询超时，跳过此群。")
             except Exception as e:
                 logger.error(f"❌ 自动导出失败，群组 {chat_id}: {e}")
 
-        # ✅ 导出完成后的等待策略
+        # ✅ 修复：但保留原有的休眠策略
         sleep_time = 120 if export_executed else 60
         logger.info(f"🕐 导出循环结束，休眠 {sleep_time}s ...")
         await asyncio.sleep(sleep_time)
@@ -4894,3 +4909,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"💥 机器人异常退出: {e}")
         sys.exit(1)
+

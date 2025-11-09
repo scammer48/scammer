@@ -1,6 +1,5 @@
-# config.py - 完整优化版本（确保无遗漏）
+# config.py - 完整优化版本
 import os
-import sys
 from datetime import timedelta, timezone
 from typing import Dict, Any, List
 
@@ -13,7 +12,9 @@ class Config:
     TOKEN = os.getenv("BOT_TOKEN", "")
 
     # 数据库配置
-    DATABASE_URL = os.getenv("DATABASE_URL", "")
+    DATABASE_URL = os.getenv(
+        "DATABASE_URL", ""
+    )
 
     # 性能优化配置
     PERFORMANCE_CONFIG = {
@@ -44,19 +45,9 @@ class Config:
             return bool(cls.WEBHOOK_URL) and not cls.is_development()
 
     @classmethod
-    def should_use_polling(cls):
-        """智能判断是否应该使用Polling模式"""
-        return not cls.should_use_webhook()
-
-    @classmethod
     def is_development(cls):
         """判断是否是开发环境"""
         return cls.get_environment() == "development"
-
-    @classmethod
-    def get_environment(cls):
-        """获取当前环境"""
-        return os.getenv("ENVIRONMENT", "development")
 
     # 数据库连接池高级配置
     DB_MIN_CONNECTIONS = int(os.getenv("DB_MIN_CONNECTIONS", "2"))
@@ -255,13 +246,46 @@ class Config:
         "high_memory_threshold": 0.7,
     }
 
-    # 数据库重试配置
-    DATABASE_RETRY_CONFIG = {
-        "MAX_RETRIES": 3,
-        "BASE_DELAY": 1.0,
-        "MAX_DELAY": 10.0,
-        "JITTER": 0.1,
-    }
+
+# 在Config类中添加
+DATABASE_RETRY_CONFIG = {
+    "MAX_RETRIES": 3,
+    "BASE_DELAY": 1.0,
+    "MAX_DELAY": 10.0,
+    "JITTER": 0.1,
+}
+
+
+# 配置验证
+try:
+    if not Config.TOKEN:
+        raise ValueError("BOT_TOKEN 未设置")
+    if not Config.ADMINS:
+        raise ValueError("ADMIN_IDS 未设置有效的管理员ID")
+
+    if Config.DATABASE_URL and Config.DATABASE_URL.startswith("postgresql"):
+        required_parts = ["postgresql://", "@", "/"]
+        for part in required_parts:
+            if part not in Config.DATABASE_URL:
+                raise ValueError(f"PostgreSQL 数据库URL格式不正确，缺少: {part}")
+    elif Config.DATABASE_URL and Config.DATABASE_URL.startswith("sqlite:///"):
+        db_path = Config.DATABASE_URL.replace("sqlite:///", "")
+        if not db_path:
+            raise ValueError("SQLite 数据库路径不能为空")
+
+    if Config.DB_MIN_CONNECTIONS < 1:
+        raise ValueError("数据库连接池最小连接数必须大于0")
+    if Config.DB_MAX_CONNECTIONS < Config.DB_MIN_CONNECTIONS:
+        raise ValueError("数据库连接池最大连接数必须大于等于最小连接数")
+
+    print("✅ 配置验证通过")
+
+except ValueError as e:
+    print(f"❌ 配置错误: {e}")
+    exit(1)
+except Exception as e:
+    print(f"❌ 配置验证过程中出现未知错误: {e}")
+    exit(1)
 
 
 # 环境工具类
@@ -329,7 +353,6 @@ class PerformanceConfig:
 
 # 启动配置打印
 def print_startup_config():
-    """打印启动配置信息"""
     print("🚀 机器人启动配置:")
     print(f"   环境: {EnvUtils.get_environment()}")
     print(f"   调试模式: {EnvUtils.should_enable_debug()}")
@@ -339,62 +362,18 @@ def print_startup_config():
     )
     print(f"   管理员数量: {len(Config.ADMINS)}")
     print(f"   活动数量: {len(Config.DEFAULT_ACTIVITY_LIMITS)}")
-    print(f"   运行模式: {Config.BOT_MODE}")
-    print(f"   Webhook URL: {Config.WEBHOOK_URL if Config.WEBHOOK_URL else '未设置'}")
-    print(f"   使用Webhook: {Config.should_use_webhook()}")
-    print(f"   数据库连接池: {Config.DB_MIN_CONNECTIONS}-{Config.DB_MAX_CONNECTIONS}")
 
 
-# 配置验证
-def validate_config():
-    """验证配置完整性"""
-    try:
-        if not Config.TOKEN:
-            raise ValueError("BOT_TOKEN 未设置")
-        if not Config.ADMINS:
-            raise ValueError("ADMIN_IDS 未设置有效的管理员ID")
-
-        if Config.DATABASE_URL and Config.DATABASE_URL.startswith("postgresql"):
-            required_parts = ["postgresql://", "@", "/"]
-            for part in required_parts:
-                if part not in Config.DATABASE_URL:
-                    raise ValueError(f"PostgreSQL 数据库URL格式不正确，缺少: {part}")
-        elif Config.DATABASE_URL and Config.DATABASE_URL.startswith("sqlite:///"):
-            db_path = Config.DATABASE_URL.replace("sqlite:///", "")
-            if not db_path:
-                raise ValueError("SQLite 数据库路径不能为空")
-
-        if Config.DB_MIN_CONNECTIONS < 1:
-            raise ValueError("数据库连接池最小连接数必须大于0")
-        if Config.DB_MAX_CONNECTIONS < Config.DB_MIN_CONNECTIONS:
-            raise ValueError("数据库连接池最大连接数必须大于等于最小连接数")
-
-        # 验证Webhook配置
-        if Config.BOT_MODE == "webhook" and not Config.WEBHOOK_URL:
-            raise ValueError("Webhook模式已启用，但WEBHOOK_URL未设置")
-
-        print("✅ 配置验证通过")
-        return True
-
-    except ValueError as e:
-        print(f"❌ 配置错误: {e}")
-        return False
-    except Exception as e:
-        print(f"❌ 配置验证过程中出现未知错误: {e}")
-        return False
-
-
-# 初始化时验证配置
-if validate_config():
-    print_startup_config()
-else:
-    sys.exit(1)
+@classmethod
+def should_use_polling(cls):
+    """智能判断是否应该使用Polling模式"""
+    return not cls.should_use_webhook()
 
 
 if __name__ == "__main__":
-    # 直接运行时只打印配置，不退出
     print_startup_config()
 else:
-    # 作为模块导入时，只在非Web服务器环境下打印
+    import sys
+
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()

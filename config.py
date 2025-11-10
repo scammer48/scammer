@@ -33,16 +33,25 @@ class Config:
     BOT_MODE = os.getenv("BOT_MODE", "auto")  # auto, webhook, polling
     WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Webhook完整URL
 
+    # 修改 should_use_webhook 方法
     @classmethod
     def should_use_webhook(cls):
-        """判断是否应该使用Webhook模式"""
-        if cls.BOT_MODE == "webhook":
+        """判断是否应该使用Webhook模式 - 修复版本"""
+        mode = cls.BOT_MODE.lower()
+
+        if mode == "webhook":
+            if not cls.WEBHOOK_URL:
+                print("⚠️ 警告: Webhook模式已启用但WEBHOOK_URL未设置")
             return True
-        elif cls.BOT_MODE == "polling":
+        elif mode == "polling":
             return False
         else:  # auto模式
-            # 自动检测：有WEBHOOK_URL且不在开发环境就使用Webhook
-            return bool(cls.WEBHOOK_URL) and not cls.is_development()
+            # 在Render等云平台默认使用Polling，除非明确配置Webhook
+            if cls.is_development():
+                return bool(cls.WEBHOOK_URL)
+            else:
+                # 生产环境：只有明确配置了WEBHOOK_URL才使用Webhook
+                return bool(cls.WEBHOOK_URL) and cls.WEBHOOK_URL.strip()
 
     @classmethod
     def is_development(cls):

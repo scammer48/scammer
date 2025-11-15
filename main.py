@@ -4304,30 +4304,21 @@ async def auto_daily_export_task():
 
 async def daily_reset_task():
     """
-    🎯 完全重写版：每日自动重置任务（修复版）
+    🎯 完整修复版每日自动重置任务
     """
+    from datetime import timedelta
+    
     while True:
         now = get_beijing_time()
-
-        # 每分钟检查一次，但只在整分钟时记录日志避免刷屏
-        if now.second == 0:
-            logger.debug(
-                f"🔄 重置任务运行中，当前时间: {now.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+        logger.debug(f"🔄 重置任务检查，当前时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
         try:
             all_groups = await asyncio.wait_for(db.get_all_groups(), timeout=15)
-            if not all_groups:
-                logger.debug("⚠️ 未找到任何群组")
-                await asyncio.sleep(60)
-                continue
-
+            logger.debug(f"📊 找到 {len(all_groups)} 个群组")
         except Exception as e:
             logger.error(f"❌ 获取群组列表失败: {e}")
             await asyncio.sleep(60)
             continue
-
-        reset_executed = False
 
         for chat_id in all_groups:
             try:
@@ -4335,90 +4326,92 @@ async def daily_reset_task():
                     db.get_group_cached(chat_id), timeout=10
                 )
                 if not group_data:
+                    logger.debug(f"ℹ️ 群组 {chat_id} 没有数据，跳过")
                     continue
 
                 reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
                 reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-                # 🎯 关键修复：精确匹配重置时间
+                # 到达重置时间
                 if now.hour == reset_hour and now.minute == reset_minute:
-                    logger.info(
-                        f"⏰ 到达重置时间 {reset_hour:02d}:{reset_minute:02d}，正在重置群组 {chat_id} 的数据..."
+                    logger.info(f"⏰ 到达重置时间 {reset_hour:02d}:{reset_minute:02d}，正在重置群组 {chat_id} 的数据...")
+
+                    # 🎯 计算新的周期开始时间
+                    reset_time_today = now.replace(
+                        hour=reset_hour, minute=reset_minute, second=0, microsecond=0
                     )
+                    
+                    # 完整的时间计算逻辑
+                    if now < reset_time_today:
+                        current_period_start = reset_time_today - timedelta(days=1)
+                    else:
+                        current_period_start = reset_time_today
 
-                    # 🎯 计算新的周期日期（今天）
-                    new_period_date = now.date()
+                    logger.info(f"🔄 新周期开始时间: {current_period_start.strftime('%Y-%m-%d %H:%M:%S')}")
 
-                    # 获取需要重置的用户（最后更新日期不是今天的用户）
-                    users_to_reset = []
+                    # 🎯 使用修复后的 get_group_members 方法
                     try:
-                        async with db.pool.acquire() as conn:
-                            rows = await conn.fetch(
-                                """
-                                SELECT user_id, last_updated 
-                                FROM users 
-                                WHERE chat_id = $1 AND last_updated IS NOT NULL
-                                """,
-                                chat_id,
-                            )
-
-                            for row in rows:
-                                user_last_updated = row["last_updated"]
-                                # 如果用户最后更新日期不是今天，需要重置
-                                if user_last_updated != new_period_date:
-                                    users_to_reset.append(row["user_id"])
-
-                    except Exception as e:
-                        logger.error(f"❌ 获取重置用户列表失败 {chat_id}: {e}")
-                        # 如果获取失败，重置所有用户
                         group_members = await db.get_group_members(chat_id)
-                        users_to_reset = [user["user_id"] for user in group_members]
+                        logger.info(f"📊 群组 {chat_id} 共有 {len(group_members)} 个用户需要重置")
+                        
+                        if not group_members:
+                            logger.warning(f"⚠️ 群组 {chat_id} 没有找到任何用户，跳过重置")
+                            continue
+                    except Exception as e:
+                        logger.error(f"❌ 获取群组 {chat_id} 成员失败: {e}")
+                        continue
 
                     reset_count = 0
-
-                    if users_to_reset:
-                        logger.info(f"🔄 需要重置的用户数量: {len(users_to_reset)}")
-
-                        for user_id in users_to_reset:
-                            try:
-                                user_lock = get_user_lock(chat_id, user_id)
-                                async with user_lock:
-                                    # 🎯 关键修复：传递新的周期日期
-                                    success = await db.reset_user_daily_data(
-                                        chat_id,
-                                        user_id,
-                                        new_period_date,  # 🆕 使用新的周期日期
-                                    )
-                                    if success:
-                                        reset_count += 1
-
-                                # 避免过于密集的数据库操作
-                                await asyncio.sleep(0.1)
-
-                            except Exception as e:
-                                logger.error(f"❌ 重置用户 {user_id} 失败: {e}")
+                    error_count = 0
+                    
+                    for user_data in group_members:
+                        try:
+                            # 🎯 验证用户数据结构
+                            if not user_data or "user_id" not in user_data:
+                                logger.warning(f"⚠️ 跳过无效用户数据: {user_data}")
+                                error_count += 1
                                 continue
+                                
+                            user_id = user_data["user_id"]
+                            user_lock = get_user_lock(chat_id, user_id)
+                            async with user_lock:
+                                logger.debug(f"🔄 正在重置用户 {user_id}...")
+                                
+                                # 🎯 使用新的周期开始日期
+                                success = await db.reset_user_daily_data(
+                                    chat_id,
+                                    user_id,
+                                    current_period_start.date(),
+                                )
+                                if success:
+                                    reset_count += 1
+                                    logger.debug(f"✅ 重置用户 {user_id} 成功")
+                                else:
+                                    logger.warning(f"⚠️ 重置用户 {user_id} 失败")
+                                    error_count += 1
+                                    
+                        except Exception as e:
+                            user_id_str = str(user_data.get('user_id', 'unknown'))
+                            logger.error(f"❌ 重置用户 {user_id_str} 失败: {e}")
+                            error_count += 1
+                            continue
 
                     logger.info(
-                        f"✅ 群组 {chat_id} 数据重置完成: {reset_count}/{len(users_to_reset)} 个用户已重置"
+                        f"✅ 群组 {chat_id} 数据重置完成\n"
+                        f"   成功: {reset_count} 个用户\n"
+                        f"   失败: {error_count} 个用户\n"
+                        f"   总计: {len(group_members)} 个用户\n"
+                        f"   新周期: {current_period_start.date()}"
                     )
-                    reset_executed = True
 
-                    # 🎯 启动延迟导出任务
+                    # 🆕 启动延迟导出任务
                     asyncio.create_task(delayed_export(chat_id, 30))
 
-            except asyncio.TimeoutError:
-                logger.warning(f"⏰ 群组 {chat_id} 重置或查询超时，跳过。")
             except Exception as e:
                 logger.error(f"❌ 群组 {chat_id} 重置失败: {e}")
 
-        # 🎯 如果执行了重置，等待2分钟避免重复执行
-        if reset_executed:
-            logger.info("⏳ 重置完成，等待2分钟避免重复...")
-            await asyncio.sleep(120)
-        else:
-            # 每分钟检查一次
-            await asyncio.sleep(60)
+        # 每分钟检查一次
+        await asyncio.sleep(60)
 
 
 async def delayed_export(chat_id: int, delay_minutes: int = 30):

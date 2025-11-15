@@ -1248,7 +1248,8 @@ async def _start_activity_locked(
     # 🆕 更新用户最后活动日期为正确的数据日期
     await db.update_user_last_updated(chat_id, uid, current_data_date)
 
-    await db.update_user_activity(chat_id, uid, act, str(now), name)
+    # 🆕 使用基于重置时间的日期更新用户活动
+    await db.update_user_activity(chat_id, uid, act, str(now), name, current_data_date)
 
     key = f"{chat_id}-{uid}"
 
@@ -3794,11 +3795,36 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
                     before_count = 0
 
                 # ✅ 安全更新活动状态
-                await asyncio.wait_for(
-                    db.complete_user_activity(
-                        chat_id, uid, act, int(elapsed), fine_amount, is_overtime
-                    ),
-                    timeout=10,
+                now = get_beijing_time()
+                group_info = await db.get_group_cached(chat_id)
+                reset_hour = (
+                    group_info.get("reset_hour", Config.DAILY_RESET_HOUR)
+                    if group_info
+                    else Config.DAILY_RESET_HOUR
+                )
+                reset_minute = (
+                    group_info.get("reset_minute", Config.DAILY_RESET_MINUTE)
+                    if group_info
+                    else Config.DAILY_RESET_MINUTE
+                )
+
+                reset_time_today = now.replace(
+                    hour=reset_hour, minute=reset_minute, second=0
+                )
+                if now < reset_time_today:
+                    current_data_date = (now - timedelta(days=1)).date()
+                else:
+                    current_data_date = now.date()
+
+                # 🆕 使用基于重置时间的日期完成活动
+                await db.complete_user_activity(
+                    chat_id,
+                    uid,
+                    act,
+                    int(elapsed),
+                    fine_amount,
+                    is_overtime,
+                    current_data_date,
                 )
 
                 after_count = await db.get_user_activity_count(chat_id, uid, act)

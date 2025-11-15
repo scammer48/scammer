@@ -1239,27 +1239,49 @@ class PostgreSQLDatabase:
                 return []
 
     async def get_group_members(self, chat_id: int) -> List[Dict]:
-        """获取群组成员"""
-        today = datetime.now().date()
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT user_id, nickname, current_activity, activity_start_time, total_accumulated_time, total_activity_count, total_fines, overtime_count, total_overtime_time FROM users WHERE chat_id = $1 AND last_updated = $2",
-                chat_id,
-                today,
-            )
-
-            result = []
-            for row in rows:
-                user_data = dict(row)
-                user_data["total_accumulated_time_formatted"] = (
-                    self.format_seconds_to_hms(user_data["total_accumulated_time"])
+        """获取群组所有用户（用于重置任务）- 完整修复版"""
+        try:
+            async with self.pool.acquire() as conn:
+                # 🎯 关键修复：移除日期限制，获取所有用户
+                rows = await conn.fetch(
+                    """
+                    SELECT 
+                        user_id, nickname, current_activity, activity_start_time, 
+                        total_accumulated_time, total_activity_count, total_fines, 
+                        overtime_count, total_overtime_time, last_updated
+                    FROM users 
+                    WHERE chat_id = $1
+                    ORDER BY user_id
+                    """,
+                    chat_id,
                 )
-                user_data["total_overtime_time_formatted"] = self.format_seconds_to_hms(
-                    user_data["total_overtime_time"]
-                )
-                result.append(user_data)
 
-            return result
+                result = []
+                for row in rows:
+                    user_data = dict(row)
+                    # 确保必要的字段存在
+                    if "user_id" not in user_data:
+                        logger.warning(f"⚠️ 跳过无效用户数据: 用户ID缺失")
+                        continue
+
+                    user_data["total_accumulated_time_formatted"] = (
+                        self.format_seconds_to_hms(
+                            user_data.get("total_accumulated_time", 0)
+                        )
+                    )
+                    user_data["total_overtime_time_formatted"] = (
+                        self.format_seconds_to_hms(
+                            user_data.get("total_overtime_time", 0)
+                        )
+                    )
+                    result.append(user_data)
+
+                logger.info(f"📊 获取到群组 {chat_id} 的 {len(result)} 个用户")
+                return result
+
+        except Exception as e:
+            logger.error(f"❌ 获取群组成员失败 {chat_id}: {e}")
+            return []  # 确保返回空列表而不是 None
 
     # ========== 月度统计 ==========
     async def get_monthly_statistics(

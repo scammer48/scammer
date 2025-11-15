@@ -760,6 +760,7 @@ async def reset_daily_data_if_needed(chat_id: int, uid: int):
             else:
                 data_date = now.date()
 
+            # 使用新添加的方法
             await db.update_user_last_updated(chat_id, uid, data_date)
         except Exception as init_error:
             logger.error(f"❌ 用户初始化也失败: {init_error}")
@@ -781,7 +782,6 @@ async def check_activity_limit(chat_id: int, uid: int, act: str):
         if group_info
         else Config.DAILY_RESET_HOUR
     )
-
     reset_minute = (
         group_info.get("reset_minute", Config.DAILY_RESET_MINUTE)
         if group_info

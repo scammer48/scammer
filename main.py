@@ -80,6 +80,28 @@ bot = Bot(token=Config.TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 
+async def get_current_period_start(chat_id: int):
+    """获取当前群组的重置周期开始时间"""
+    now = get_beijing_time()
+
+    group_info = await db.get_group_cached(chat_id)
+    if not group_info:
+        await db.init_group(chat_id)
+        group_info = await db.get_group_cached(chat_id)
+
+    reset_hour = group_info.get("reset_hour", Config.DAILY_RESET_HOUR)
+    reset_minute = group_info.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+    reset_time_today = now.replace(
+        hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+    )
+
+    if now < reset_time_today:
+        return reset_time_today - timedelta(days=1)
+    else:
+        return reset_time_today
+
+
 # ==================== 优化的并发安全机制 ====================
 class UserLockManager:
     """优化的用户锁管理器 - 防止内存泄漏"""
@@ -3480,6 +3502,8 @@ async def show_history(message: types.Message):
     chat_id = message.chat.id
     uid = message.from_user.id
 
+    await reset_daily_data_if_needed(chat_id, uid)
+
     async with OptimizedUserContext(chat_id, uid) as user:
         # 获取当前周期信息
         current_period = user.get("last_updated", datetime.now().date())
@@ -3546,6 +3570,8 @@ async def show_rank(message: types.Message):
     """显示排行榜（当前周期版本）"""
     chat_id = message.chat.id
     uid = message.from_user.id
+
+    await reset_daily_data_if_needed(chat_id, uid)
 
     await db.init_group(chat_id)
     activity_limits = await db.get_activity_limits_cached()
@@ -4303,7 +4329,13 @@ async def daily_reset_task():
                     logger.info(f"⏰ 到达重置时间，正在重置群组 {chat_id} 的数据...")
 
                     # 🆕 关键修复：计算昨天的日期
-                    yesterday = now - timedelta(days=1)
+                    reset_time_today = now.replace(
+                        hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+                    )
+                    current_period_start = reset_time_today
+                    await db.reset_user_daily_data(
+                        chat_id, user_data["user_id"], current_period_start.date()
+                    )
 
                     # 执行每日数据重置（带用户锁防并发）
                     group_members = await db.get_group_members(chat_id)

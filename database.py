@@ -466,23 +466,30 @@ class PostgreSQLDatabase:
         activity: str,
         start_time: str,
         nickname: str = None,
+        target_date: date = None,  # 🆕 添加目标日期参数
     ):
-        """更新用户活动状态"""
+        """更新用户活动状态 - 基于重置时间版本"""
+        # 🆕 如果没有指定目标日期，使用当前日期
+        if target_date is None:
+            target_date = datetime.now().date()
+
         async with self.pool.acquire() as conn:
             if nickname:
                 await conn.execute(
-                    "UPDATE users SET current_activity = $1, activity_start_time = $2, nickname = $3, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $4 AND user_id = $5",
+                    "UPDATE users SET current_activity = $1, activity_start_time = $2, nickname = $3, last_updated = $4, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $5 AND user_id = $6",
                     activity,
                     start_time,
                     nickname,
+                    target_date,  # 🆕 使用目标日期
                     chat_id,
                     user_id,
                 )
             else:
                 await conn.execute(
-                    "UPDATE users SET current_activity = $1, activity_start_time = $2, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $3 AND user_id = $4",
+                    "UPDATE users SET current_activity = $1, activity_start_time = $2, last_updated = $3, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $4 AND user_id = $5",
                     activity,
                     start_time,
+                    target_date,  # 🆕 使用目标日期
                     chat_id,
                     user_id,
                 )
@@ -496,12 +503,15 @@ class PostgreSQLDatabase:
         elapsed_time: int,
         fine_amount: int = 0,
         is_overtime: bool = False,
+        target_date: date = None,  # 🆕 添加目标日期参数
     ):
-        """完成用户活动 - 修复计数问题版本"""
-        today = datetime.now().date()
+        """完成用户活动 - 基于重置时间版本"""
+        # 🆕 如果没有指定目标日期，使用当前日期
+        if target_date is None:
+            target_date = datetime.now().date()
 
         logger.info(
-            f"🔍 [数据库操作开始] 用户{user_id} 活动{activity} 时长{elapsed_time}s"
+            f"🔍 [数据库操作开始] 用户{user_id} 活动{activity} 时长{elapsed_time}s 日期{target_date}"
         )
 
         async with self.pool.acquire() as conn:
@@ -516,7 +526,7 @@ class PostgreSQLDatabase:
                     """,
                     chat_id,
                     user_id,
-                    today,
+                    target_date,  # 🆕 使用目标日期
                 )
 
                 # 使用 ON CONFLICT 原子更新活动计数
@@ -533,7 +543,7 @@ class PostgreSQLDatabase:
                     """,
                     chat_id,
                     user_id,
-                    today,
+                    target_date,  # 🆕 使用目标日期
                     activity,
                     elapsed_time,
                 )
@@ -546,7 +556,7 @@ class PostgreSQLDatabase:
                     "activity_start_time = NULL",
                     "last_updated = $2",
                 ]
-                params = [elapsed_time, today]
+                params = [elapsed_time, target_date]  # 🆕 使用目标日期
 
                 if fine_amount > 0:
                     update_fields.append("total_fines = total_fines + $3")
@@ -594,8 +604,7 @@ class PostgreSQLDatabase:
             # 🆕 计算新的日期（重置后的日期）
             new_date = target_date
             # 如果是重置昨天的数据，那么新的日期应该是今天
-            if target_date < datetime.now().date():
-                new_date = datetime.now().date()
+            new_date = target_date
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():

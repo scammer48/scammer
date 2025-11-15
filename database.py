@@ -602,36 +602,29 @@ class PostgreSQLDatabase:
         self, chat_id: int, user_id: int, target_date: date | None = None
     ):
         """
-        ✅ 修复版：重置用户每日数据但保留历史记录
-        只重置累计统计和当前状态，不删除历史记录
+        ✅ 完整修复版：重置用户每日数据
         """
         try:
             # 验证和设置目标日期
             if target_date is None:
                 target_date = datetime.now().date()
             elif not isinstance(target_date, date):
-                raise ValueError(
-                    f"target_date必须是date类型，得到: {type(target_date)}"
-                )
+                # 如果是字符串，转换为日期
+                if isinstance(target_date, str):
+                    target_date = datetime.strptime(target_date, "%Y-%m-%d").date()
+                else:
+                    raise ValueError(
+                        f"target_date必须是date类型，得到: {type(target_date)}"
+                    )
 
-            # 获取重置前的用户状态（用于日志）
-            user_before = await self.get_user(chat_id, user_id)
-
-            # 🆕 计算新的日期（重置后的日期）
-            new_date = target_date
-            # 如果是重置昨天的数据，那么新的日期应该是今天
-            if target_date < datetime.now().date():
-                new_date = datetime.now().date()
+            logger.info(
+                f"🔄 开始重置用户数据: {chat_id}-{user_id} -> 新周期: {target_date}"
+            )
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    # 🆕 关键修改：不再删除历史记录！
-                    # ❌ 删除这2个DELETE操作：
-                    # - 不要删除 user_activities 记录（保留导出所需的历史数据）
-                    # - 不要删除 work_records 记录（保留上下班打卡历史）
-
-                    # 3. 只重置用户统计数据和状态
-                    await conn.execute(
+                    # 🎯 关键修复：更新用户周期到新的日期，并重置统计数据
+                    result = await conn.execute(
                         """
                         UPDATE users SET
                             total_activity_count = 0,
@@ -641,38 +634,43 @@ class PostgreSQLDatabase:
                             total_fines = 0,
                             current_activity = NULL,
                             activity_start_time = NULL,
-                            last_updated = $3,  
+                            last_updated = $3,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE chat_id = $1 AND user_id = $2
                         """,
                         chat_id,
                         user_id,
-                        new_date,  # 🆕 使用新的日期
+                        target_date,
                     )
 
-            # 4. 清理相关缓存
+                    # 检查是否成功更新
+                    if "UPDATE 0" in result:
+                        # 如果用户不存在，创建用户记录
+                        await conn.execute(
+                            """
+                            INSERT INTO users (chat_id, user_id, last_updated, nickname)
+                            VALUES ($1, $2, $3, $4)
+                            ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                                last_updated = EXCLUDED.last_updated
+                            """,
+                            chat_id,
+                            user_id,
+                            target_date,
+                            f"用户{user_id}",
+                        )
+
+            # 清理相关缓存
             cache_keys = [
                 f"user:{chat_id}:{user_id}",
                 f"group:{chat_id}",
-                "activity_limits",
             ]
             for key in cache_keys:
                 self._cache.pop(key, None)
                 self._cache_ttl.pop(key, None)
 
-            # 记录详细的重置日志
             logger.info(
-                f"✅ 数据重置完成（保留历史记录）: 用户 {user_id} (群组 {chat_id})\n"
-                f"   📅 重置日期: {target_date} → {new_date}\n"
-                f"   💾 历史记录: 已保留（支持后续导出）\n"
-                f"   📊 重置前状态:\n"
-                f"       - 活动次数: {user_before.get('total_activity_count', 0) if user_before else 0}\n"
-                f"       - 累计时长: {user_before.get('total_accumulated_time', 0) if user_before else 0}秒\n"
-                f"       - 罚款金额: {user_before.get('total_fines', 0) if user_before else 0}元\n"
-                f"       - 超时次数: {user_before.get('overtime_count', 0) if user_before else 0}\n"
-                f"       - 当前活动: {user_before.get('current_activity', '无') if user_before else '无'}"
+                f"✅ 用户数据重置完成: {chat_id}-{user_id} -> 新周期: {target_date}"
             )
-
             return True
 
         except Exception as e:

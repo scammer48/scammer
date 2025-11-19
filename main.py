@@ -4055,6 +4055,53 @@ async def export_data(message: types.Message):
         await message.answer(f"❌ 导出失败：{e}")
 
 
+# ==================== 从月度表获取统计数据 ====================
+
+
+async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[Dict]:
+    """从月度统计表获取群组统计数据（用于重置后导出）"""
+    try:
+        # 获取目标日期对应的月份
+        month_start = target_date.replace(day=1)
+
+        logger.info(
+            f"🔍 从月度表查询数据: 群组{chat_id}, 日期{target_date}, 月份{month_start}"
+        )
+
+        # 从月度表获取数据
+        monthly_stats = await db.get_monthly_statistics(
+            chat_id, month_start.year, month_start.month
+        )
+
+        if not monthly_stats:
+            logger.warning(f"⚠️ 月度表中没有找到 {month_start} 的数据")
+            return []
+
+        result = []
+        for stat in monthly_stats:
+            user_data = {
+                "user_id": stat["user_id"],
+                "nickname": stat.get("nickname", f"用户{stat['user_id']}"),
+                "total_accumulated_time": stat.get("total_time", 0),
+                "total_activity_count": stat.get("total_count", 0),
+                "total_fines": stat.get("total_fines", 0),
+                "overtime_count": stat.get("total_overtime_count", 0),
+                "total_overtime_time": stat.get("total_overtime_time", 0),
+                "activities": stat.get("activities", {}),
+            }
+
+            result.append(user_data)
+
+        logger.info(
+            f"✅ 从月度表成功获取 {target_date} 的数据，共 {len(result)} 个用户"
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"❌ 从月度表获取数据失败: {e}")
+        return []
+
+
 # ==================== CSV导出推送功能优化 ====================
 async def optimized_monthly_export(chat_id: int, year: int, month: int):
     """优化版月度数据导出，每个用户一行，活动横向排列"""
@@ -4121,17 +4168,16 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
         return None
 
 
-# main.py - 替换 export_and_push_csv 为下面版本
 async def export_and_push_csv(
     chat_id: int,
     to_admin_if_no_group: bool = True,
     file_name: str = None,
-    target_date=None,  # datetime.date 或 datetime.datetime 或 None
+    target_date=None,
 ):
-    """导出群组数据为 CSV 并推送 - 支持按 target_date 导出（默认：当天）"""
+    """导出群组数据为 CSV 并推送 - 支持从月度表恢复数据"""
     await db.init_group(chat_id)
 
-    # 规范 target_date（如果传了 datetime，取 .date()）
+    # 规范 target_date
     if target_date is not None and hasattr(target_date, "date"):
         target_date = target_date.date()
 
@@ -4141,6 +4187,13 @@ async def export_and_push_csv(
         else:
             date_str = get_beijing_time().strftime("%Y%m%d_%H%M%S")
         file_name = f"group_{chat_id}_statistics_{date_str}.csv"
+
+    # 🆕 关键修复：检查是否是重置后的导出（目标日期是昨天）
+    now = get_beijing_time()
+    is_reset_export = False
+    if target_date and target_date == (now - timedelta(days=1)).date():
+        is_reset_export = True
+        logger.info(f"🔄 检测到重置后导出，将从月度表恢复 {target_date} 的数据")
 
     csv_buffer = StringIO()
     writer = csv.writer(csv_buffer)
@@ -4156,9 +4209,14 @@ async def export_and_push_csv(
 
     has_data = False
 
-    # 关键：把 target_date 传给 db.get_group_statistics
-    group_stats = await db.get_group_statistics(chat_id, target_date)
+    if is_reset_export:
+        # 🆕 重置后导出：从月度表获取数据
+        group_stats = await get_group_stats_from_monthly(chat_id, target_date)
+    else:
+        # 正常导出：从日常表获取数据
+        group_stats = await db.get_group_statistics(chat_id, target_date)
 
+    # 后续代码保持不变...
     for user_data in group_stats:
         total_count = user_data.get("total_activity_count", 0)
         total_time = user_data.get("total_accumulated_time", 0)

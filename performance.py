@@ -1,275 +1,398 @@
-# performance.py - 优化版本
 import time
-import psutil
 import asyncio
 import logging
+from typing import Dict, Any, Callable, Optional, List
 from functools import wraps
-from typing import Any, Callable, Dict, Optional
-from datetime import datetime
-from collections import defaultdict
-import weakref
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 logger = logging.getLogger("GroupCheckInBot")
 
 
+@dataclass
+class PerformanceMetrics:
+    """性能指标"""
+
+    count: int = 0
+    total_time: float = 0
+    avg_time: float = 0
+    max_time: float = 0
+    min_time: float = float("inf")
+    last_updated: float = 0
+
+
 class PerformanceMonitor:
-    """优化的性能监控器"""
+    """性能监控器"""
 
     def __init__(self):
-        self.metrics = defaultdict(list)
-        self.slow_operations = []
+        self.metrics: Dict[str, PerformanceMetrics] = {}
+        self.slow_operations_count = 0
         self.start_time = time.time()
-        self._operation_count = 0
 
-    def track_operation(self, operation_name: str):
-        def decorator(func: Callable) -> Callable:
+    def track(self, operation_name: str):
+        """性能跟踪装饰器"""
+
+        def decorator(func):
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
                 start_time = time.time()
-                self._operation_count += 1
-
                 try:
                     result = await func(*args, **kwargs)
                     return result
-                except Exception as e:
-                    raise e
                 finally:
-                    duration = time.time() - start_time
-                    self.metrics[f"{operation_name}_time"].append(duration)
+                    execution_time = time.time() - start_time
+                    self._record_metrics(operation_name, execution_time)
 
-                    # 只记录真正慢的操作
-                    if duration > 2.0:
-                        self.slow_operations.append(
-                            {
-                                "operation": operation_name,
-                                "duration": duration,
-                                "timestamp": datetime.now(),
-                            }
-                        )
-                        logger.warning(
-                            f"🐌 慢操作: {operation_name} 耗时 {duration:.2f}s"
-                        )
+            @wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                start_time = time.time()
+                try:
+                    result = func(*args, **kwargs)
+                    return result
+                finally:
+                    execution_time = time.time() - start_time
+                    self._record_metrics(operation_name, execution_time)
 
-                    # 每100次操作报告一次
-                    if self._operation_count % 100 == 0:
-                        self._report_metrics(operation_name)
-
-            return async_wrapper
+            return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
 
         return decorator
 
-    def _report_metrics(self, operation_name: str):
-        """简化报告逻辑"""
-        times = self.metrics.get(f"{operation_name}_time", [])
-        if times:
-            avg_time = sum(times) / len(times)
-            logger.info(
-                f"📊 {operation_name} 平均耗时: {avg_time:.3f}s, 样本数: {len(times)}"
+    def _record_metrics(self, operation_name: str, execution_time: float):
+        """记录性能指标"""
+        if operation_name not in self.metrics:
+            self.metrics[operation_name] = PerformanceMetrics()
+
+        metrics = self.metrics[operation_name]
+        metrics.count += 1
+        metrics.total_time += execution_time
+        metrics.avg_time = metrics.total_time / metrics.count
+        metrics.max_time = max(metrics.max_time, execution_time)
+        metrics.min_time = min(metrics.min_time, execution_time)
+        metrics.last_updated = time.time()
+
+        # 记录慢操作
+        if execution_time > 1.0:  # 超过1秒视为慢操作
+            self.slow_operations_count += 1
+            logger.warning(
+                f"⏱️ 慢操作检测: {operation_name} 耗时 {execution_time:.3f}秒"
             )
 
+    def get_metrics(self, operation_name: str) -> Optional[PerformanceMetrics]:
+        """获取指定操作的性能指标"""
+        return self.metrics.get(operation_name)
+
     def get_performance_report(self) -> Dict[str, Any]:
-        """简化性能报告"""
+        """获取性能报告"""
+        uptime = time.time() - self.start_time
+
+        # 计算内存使用（近似值）
+        try:
+            import psutil
+
+            process = psutil.Process()
+            memory_usage_mb = process.memory_info().rss / 1024 / 1024
+        except ImportError:
+            memory_usage_mb = 0
+
+        # 汇总指标
+        metrics_summary = {}
+        for op_name, metrics in self.metrics.items():
+            if metrics.count > 0:
+                metrics_summary[op_name] = {
+                    "count": metrics.count,
+                    "avg": metrics.avg_time,
+                    "max": metrics.max_time,
+                    "min": metrics.min_time if metrics.min_time != float("inf") else 0,
+                }
+
         return {
-            "uptime": time.time() - self.start_time,
-            "memory_usage_mb": self.get_memory_usage(),
-            "slow_operations_count": len(self.slow_operations),
-            "total_operations": self._operation_count,
+            "uptime": uptime,
+            "memory_usage_mb": memory_usage_mb,
+            "slow_operations_count": self.slow_operations_count,
+            "total_operations": sum(m.count for m in self.metrics.values()),
+            "metrics_summary": metrics_summary,
         }
 
-    def get_memory_usage(self) -> float:
-        """获取内存使用量(MB)"""
-        try:
-            process = psutil.Process()
-            return process.memory_info().rss / 1024 / 1024
-        except:
-            return 0
-
-
-class MemoryAwareTaskManager:
-    """简化的任务管理器"""
-
-    def __init__(self, max_memory_mb: int = 400):
-        self.max_memory_mb = max_memory_mb
-        self._tasks = weakref.WeakSet()
-
-    async def create_task(self, coro, name: Optional[str] = None) -> asyncio.Task:
-        """创建任务并检查内存"""
-        if not self.memory_usage_ok():
-            await self.cleanup_tasks()
-
-        task = asyncio.create_task(coro)
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return task
-
-    def memory_usage_ok(self) -> bool:
-        """检查内存使用"""
-        try:
-            process = psutil.Process()
-            memory_mb = process.memory_info().rss / 1024 / 1024
-            return memory_mb < self.max_memory_mb
-        except:
-            return True
-
-    async def cleanup_tasks(self):
-        """清理已完成的任务"""
-        completed = [task for task in self._tasks if task.done()]
-        for task in completed:
-            try:
-                await task
-            except Exception:
-                pass
-            self._tasks.discard(task)
+    def reset_metrics(self):
+        """重置性能指标"""
+        self.metrics.clear()
+        self.slow_operations_count = 0
 
 
 class RetryManager:
-    """简化的重试管理器"""
+    """重试管理器"""
 
     def __init__(self, max_retries: int = 3, base_delay: float = 1.0):
         self.max_retries = max_retries
         self.base_delay = base_delay
 
-    async def execute_with_retry(self, coro, operation_name: str = ""):
-        """带重试的执行"""
-        last_exception = None
+    def with_retry(self, operation_name: str = "unknown"):
+        """重试装饰器"""
 
-        for attempt in range(self.max_retries):
-            try:
-                return await coro
-            except Exception as e:
-                last_exception = e
-                if attempt < self.max_retries - 1:
-                    delay = self.base_delay * (2**attempt)
-                    logger.warning(
-                        f"⚠️ {operation_name} 第 {attempt + 1} 次失败，{delay:.1f}秒后重试"
-                    )
-                    await asyncio.sleep(delay)
+        def decorator(func):
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                last_exception = None
+                for attempt in range(self.max_retries + 1):
+                    try:
+                        return await func(*args, **kwargs)
+                    except Exception as e:
+                        last_exception = e
+                        if attempt == self.max_retries:
+                            break
 
-        logger.error(
-            f"❌ {operation_name} 重试{self.max_retries}次后失败: {last_exception}"
-        )
-        raise last_exception
+                        delay = self.base_delay * (2**attempt)  # 指数退避
+                        logger.warning(
+                            f"🔄 重试 {operation_name} (尝试 {attempt + 1}/{self.max_retries}): {e}"
+                        )
+                        await asyncio.sleep(delay)
+
+                logger.error(
+                    f"❌ {operation_name} 重试{self.max_retries}次后失败: {last_exception}"
+                )
+                raise last_exception
+
+            return async_wrapper
+
+        return decorator
 
 
-class AsyncCache:
-    """简化的异步缓存"""
+class GlobalCache:
+    """全局缓存管理器"""
 
     def __init__(self, default_ttl: int = 300):
-        self._cache = {}
-        self._cache_ttl = {}
-        self._default_ttl = default_ttl
-        self._lock = asyncio.Lock()
+        self._cache: Dict[str, Any] = {}
+        self._cache_ttl: Dict[str, float] = {}
         self._hits = 0
         self._misses = 0
+        self.default_ttl = default_ttl
 
-    async def get(self, key: str) -> Any:
+    def get(self, key: str) -> Any:
         """获取缓存值"""
-        async with self._lock:
-            if key in self._cache_ttl and time.time() < self._cache_ttl[key]:
-                self._hits += 1
-                return self._cache.get(key)
-            else:
-                self._misses += 1
-                # 自动清理过期缓存
-                if key in self._cache:
-                    del self._cache[key]
-                if key in self._cache_ttl:
-                    del self._cache_ttl[key]
-                return None
+        if key in self._cache_ttl and time.time() < self._cache_ttl[key]:
+            self._hits += 1
+            return self._cache.get(key)
+        else:
+            self._misses += 1
+            self._cache.pop(key, None)
+            self._cache_ttl.pop(key, None)
+            return None
 
-    async def set(self, key: str, value: Any, ttl: Optional[int] = None):
+    def set(self, key: str, value: Any, ttl: int = None):
         """设置缓存值"""
-        async with self._lock:
-            ttl = ttl or self._default_ttl
-            self._cache[key] = value
-            self._cache_ttl[key] = time.time() + ttl
+        if ttl is None:
+            ttl = self.default_ttl
 
-    async def delete(self, key: str):
+        self._cache[key] = value
+        self._cache_ttl[key] = time.time() + ttl
+
+    def delete(self, key: str):
         """删除缓存值"""
-        async with self._lock:
+        self._cache.pop(key, None)
+        self._cache_ttl.pop(key, None)
+
+    def clear_expired(self):
+        """清理过期缓存"""
+        current_time = time.time()
+        expired_keys = [
+            key for key, expiry in self._cache_ttl.items() if current_time >= expiry
+        ]
+        for key in expired_keys:
             self._cache.pop(key, None)
             self._cache_ttl.pop(key, None)
 
-    async def clear_expired(self):
-        """清理过期缓存"""
-        async with self._lock:
-            now = time.time()
-            expired_keys = [
-                key for key, expiry in self._cache_ttl.items() if now >= expiry
-            ]
-            for key in expired_keys:
-                self._cache.pop(key, None)
-                self._cache_ttl.pop(key, None)
+        if expired_keys:
+            logger.debug(f"清理了 {len(expired_keys)} 个过期缓存")
+
+    def clear_all(self):
+        """清理所有缓存"""
+        self._cache.clear()
+        self._cache_ttl.clear()
+        logger.info("所有缓存已清理")
 
     def get_stats(self) -> Dict[str, Any]:
         """获取缓存统计"""
         total = self._hits + self._misses
         hit_rate = self._hits / total if total > 0 else 0
+
         return {
+            "size": len(self._cache),
             "hits": self._hits,
             "misses": self._misses,
             "hit_rate": hit_rate,
-            "size": len(self._cache),
+            "total_operations": total,
         }
 
 
-# 消息去重装饰器
-def message_deduplicate(func):
-    recent_messages = set()
+class TaskManager:
+    """任务管理器"""
+
+    def __init__(self):
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._task_count = 0
+
+    async def create_task(self, coro, name: str = None) -> asyncio.Task:
+        """创建并跟踪任务"""
+        if not name:
+            self._task_count += 1
+            name = f"task_{self._task_count}"
+
+        task = asyncio.create_task(coro, name=name)
+        self._tasks[name] = task
+
+        # 任务完成后自动清理
+        task.add_done_callback(lambda t: self._tasks.pop(name, None))
+
+        return task
+
+    async def cancel_task(self, name: str):
+        """取消指定任务"""
+        task = self._tasks.get(name)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            self._tasks.pop(name, None)
+
+    async def cancel_all_tasks(self):
+        """取消所有任务"""
+        tasks_to_cancel = list(self._tasks.values())
+        for task in tasks_to_cancel:
+            if not task.done():
+                task.cancel()
+
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            self._tasks.clear()
+
+    def get_task_count(self) -> int:
+        """获取任务数量"""
+        return len(self._tasks)
+
+    def get_active_tasks(self) -> List[str]:
+        """获取活跃任务列表"""
+        return [name for name, task in self._tasks.items() if not task.done()]
+
+    async def cleanup_tasks(self):
+        """清理已完成的任务"""
+        completed_tasks = [name for name, task in self._tasks.items() if task.done()]
+        for name in completed_tasks:
+            self._tasks.pop(name, None)
+
+        if completed_tasks:
+            logger.debug(f"清理了 {len(completed_tasks)} 个已完成任务")
+
+
+class MessageDeduplicate:
+    """消息去重管理器"""
+
+    def __init__(self, ttl: int = 60):
+        self._messages: Dict[str, float] = {}
+        self.ttl = ttl
+
+    def is_duplicate(self, message_id: str) -> bool:
+        """检查消息是否重复"""
+        current_time = time.time()
+
+        # 清理过期消息
+        expired_messages = [
+            msg_id
+            for msg_id, timestamp in self._messages.items()
+            if current_time - timestamp > self.ttl
+        ]
+        for msg_id in expired_messages:
+            self._messages.pop(msg_id, None)
+
+        # 检查重复
+        if message_id in self._messages:
+            return True
+
+        # 记录新消息
+        self._messages[message_id] = current_time
+        return False
+
+    def clear_expired(self):
+        """清理过期消息"""
+        current_time = time.time()
+        expired_messages = [
+            msg_id
+            for msg_id, timestamp in self._messages.items()
+            if current_time - timestamp > self.ttl
+        ]
+        for msg_id in expired_messages:
+            self._messages.pop(msg_id, None)
+
+
+# 错误处理装饰器
+def handle_database_errors(func):
+    """数据库错误处理装饰器"""
 
     @wraps(func)
-    async def wrapper(message, *args, **kwargs):
-        msg_key = f"{message.chat.id}-{message.message_id}"
+    async def async_wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"数据库操作失败 {func.__name__}: {e}")
+            # 可以根据异常类型进行不同的处理
+            raise
 
-        if msg_key in recent_messages:
-            return
+    return async_wrapper
 
-        recent_messages.add(msg_key)
-        # 10秒后自动清理
-        asyncio.create_task(_remove_message(msg_key))
 
-        return await func(message, *args, **kwargs)
+def handle_telegram_errors(func):
+    """Telegram API错误处理装饰器"""
 
-    async def _remove_message(key):
-        await asyncio.sleep(10)
-        recent_messages.discard(key)
+    @wraps(func)
+    async def async_wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Telegram API操作失败 {func.__name__}: {e}")
+            # 可以在这里添加重试逻辑或降级处理
+            raise
 
-    return wrapper
+    return async_wrapper
+
+
+# 全局实例
+performance_monitor = PerformanceMonitor()
+retry_manager = RetryManager(max_retries=3, base_delay=1.0)
+global_cache = GlobalCache(default_ttl=300)
+task_manager = TaskManager()
+message_deduplicate = MessageDeduplicate(ttl=60)
 
 
 # 便捷装饰器
 def track_performance(operation_name: str):
-    return performance_monitor.track_operation(operation_name)
+    """性能跟踪装饰器"""
+    return performance_monitor.track(operation_name)
 
 
-def with_retry(operation_name: str = "", max_retries: int = 3):
+def with_retry(operation_name: str = "unknown", max_retries: int = 3):
+    """重试装饰器"""
+    retry_mgr = RetryManager(max_retries=max_retries)
+    return retry_mgr.with_retry(operation_name)
+
+
+def message_deduplicate_decorator(ttl: int = 60):
+    """消息去重装饰器"""
+    deduplicate = MessageDeduplicate(ttl=ttl)
+
     def decorator(func):
         @wraps(func)
-        async def wrapper(*args, **kwargs):
-            retry_manager = RetryManager(max_retries=max_retries)
-            return await retry_manager.execute_with_retry(
-                func(*args, **kwargs), operation_name=operation_name or func.__name__
-            )
+        async def wrapper(message, *args, **kwargs):
+            message_id = f"{message.chat.id}_{message.message_id}"
+            if deduplicate.is_duplicate(message_id):
+                logger.debug(f"跳过重复消息: {message_id}")
+                return
+            return await func(message, *args, **kwargs)
 
         return wrapper
 
     return decorator
 
 
-# 在 performance.py 中添加
-class MemoryMonitor:
-    def __init__(self):
-        self.warning_threshold = 350  # MB
-        self.critical_threshold = 380  # MB
-
-    async def check_and_clean(self):
-        memory_mb = self.get_memory_usage()
-        if memory_mb > self.warning_threshold:
-            await self.force_cleanup()
-
-
-# 全局实例
-performance_monitor = PerformanceMonitor()
-task_manager = MemoryAwareTaskManager()
-retry_manager = RetryManager()
-global_cache = AsyncCache()
+# 简写
+message_deduplicate = message_deduplicate_decorator()

@@ -3484,7 +3484,7 @@ async def export_and_push_csv(
         caption = (
             f"📊 群组：<b>{chat_title}</b>\n"
             f"📅 统计日期：<code>{(target_date.strftime('%Y-%m-%d') if target_date else get_beijing_time().strftime('%Y-%m-%d'))}</code>\n"
-            f"⏰ 导出时间：<code>{get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>"
+            f"⏰ 导出时间：<code>{get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
             f"{MessageFormatter.create_dashed_line()}\n"
             f"💾 包含每个用户的每日活动统计"
         )
@@ -4046,3 +4046,4 @@ if __name__ == "__main__":
         logger.info("机器人已被用户中断")
     except Exception as e:
         logger.error(f"机器人运行异常: {e}")
+

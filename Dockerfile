@@ -15,18 +15,15 @@ RUN apt-get update && apt-get install -y \
 # 复制依赖文件
 COPY requirements.txt .
 
-# 关键：输出安装日志，方便 Render 构建时看到
+# 安装 Python 依赖
 RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt && pip show psutil
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制项目文件
 COPY . .
 
-# ✅ 重要：使用 Render 提供的动态 PORT 环境变量
-# 不要设置固定 PORT，Render 会自动注入
-EXPOSE 10000  
+# ✅ 修复：暴露标准端口，Render 会重定向
+EXPOSE 8080
 
-# ✅ 修改：使用 render_deploy.py 作为启动文件
-# 清空缓存
-
-CMD ["python", "render_deploy.py"]
+# ✅ 修复：使用正确的主启动文件
+CMD ["python", "main.py"]

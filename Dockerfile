@@ -21,9 +21,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制项目文件
 COPY . .
+# 1
 
 # ✅ 修复：暴露标准端口，Render 会重定向
 EXPOSE 8080
 
 # ✅ 修复：使用正确的主启动文件
 CMD ["python", "main.py"]
+

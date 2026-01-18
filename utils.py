@@ -110,18 +110,19 @@ class MessageFormatter:
         message = (
             f"{first_line}\n"
             f"✅ 打卡成功：{MessageFormatter.format_copyable_text(activity)} - {MessageFormatter.format_copyable_text(time_str)}\n"
-            f"{dashed_line}\n"
-            f"📋 活动详情\n"
             f"▫️ 本次活动类型：{MessageFormatter.format_copyable_text(activity)}\n"
-            f"▫️ 单次时长限制：{MessageFormatter.format_copyable_text(str(time_limit))}分钟 ⏱️\n"
-            f"▫️ 今日{MessageFormatter.format_copyable_text(activity)}次数：第 {MessageFormatter.format_copyable_text(str(count))} 次（上限 {MessageFormatter.format_copyable_text(str(max_times))} 次）📈\n"
-            f"{dashed_line}\n"
-            f"💡 操作提示\n"
-            f"完成后请及时点击 👉【✅ 回座打卡】👈按钮。"
+            f"⏰ 单次时长限制：{MessageFormatter.format_copyable_text(str(time_limit))}分钟 \n"
+            f"📈 今日{MessageFormatter.format_copyable_text(activity)}次数：第 {MessageFormatter.format_copyable_text(str(count))} 次（上限 {MessageFormatter.format_copyable_text(str(max_times))} 次）\n"
         )
 
         if count >= max_times:
-            message += f"\n🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限，请留意！"
+            message += f"🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限，请留意！"
+
+        message += (
+            f"\n{dashed_line}\n"
+            f"💡 操作提示\n"
+            f"完成后请及时点击 👉【✅ 回座打卡】👈按钮。"
+        )
 
         return message
 
@@ -705,7 +706,7 @@ class EnhancedPerformanceOptimizer:
         self.is_render = self._detect_render_environment()
 
         # Render 内存阈值（单位 MB）
-        self.render_memory_limit = 400  # 留 100MB 缓冲区（Render 免费版=512MB）
+        self.render_memory_limit = 180  # 留 100MB 缓冲区（Render 免费版=256MB）
 
         logger.info(
             f"🧠 EnhancedPerformanceOptimizer 初始化 - Render 环境: {self.is_render}"

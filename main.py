@@ -910,7 +910,7 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
                     msg = (
                         f"⚠️ <b>超时警告</b>\n"
                         f"👤 {MessageFormatter.format_user_link(uid, nickname)} 已超时！\n"
-                        f"🏃‍♂️ 请立即回座，避免产生罚款！"
+                        f"🏃‍♂️ 请立即回座，避免产生更多罚款！"
                     )
                     last_reminder_minute = 0
 
@@ -930,7 +930,7 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
                     msg = (
                         f"🚨 <b>超时警告</b>\n"
                         f"👤 {MessageFormatter.format_user_link(uid, nickname)} 已超时 <code>{overtime_minutes}</code> 分钟！\n"
-                        f"💢 请立刻回座，系统将持续记录超时！"
+                        f"💢 请立刻回座，系统将持续记录超时,避免产生更多罚款！"
                     )
 
                 if msg:
@@ -3976,7 +3976,7 @@ async def export_and_push_csv(
     file_name: str = None,
     target_date=None,
 ):
-    """导出群组数据为 CSV 并推送 - 基于 daily_statistics 表（完整版）"""
+    """导出群组数据为 CSV 并推送 - 基于 daily_statistics 表（完整修复版）"""
     await db.init_group(chat_id)
 
     # 规范 target_date
@@ -3995,7 +3995,7 @@ async def export_and_push_csv(
 
     activity_limits = await db.get_activity_limits_cached()
     
-    # 🎯 修改表头，添加重置类型列
+    # 🎯 核心表头定义
     headers = ["用户ID", "用户昵称", "重置类型"]
     for act in activity_limits.keys():
         headers.extend([f"{act}次数", f"{act}总时长"])
@@ -4005,20 +4005,18 @@ async def export_and_push_csv(
         "罚款总金额",
         "超时次数",
         "总超时时间",
-        "工作天数",
-        "工作时长",
+        "工作天数",      # 🆕 已包含
+        "工作时长",      # 🆕 已包含
     ])
     writer.writerow(headers)
 
-    # ✅ 保留第一个代码的数据存在性检查
     has_data = False
 
-    # 🎯 直接从 daily_statistics 获取数据
+    # 🎯 调用之前修复好的数据库查询函数
     group_stats = await db.get_group_statistics(chat_id, target_date)
 
     # 处理每个用户的数据
     for user_data in group_stats:
-        # 🆕 最小修复：只在需要的地方添加保护
         if not isinstance(user_data, dict):
             continue
 
@@ -4027,25 +4025,25 @@ async def export_and_push_csv(
         if not isinstance(user_activities, dict):
             user_activities = {}
 
-        # ✅ 保留第一个代码的 has_data 检查逻辑
+        # 检查是否包含有效数据（活动或罚款）
         total_count = user_data.get("total_activity_count", 0)
         total_time = user_data.get("total_accumulated_time", 0)
-        if total_count > 0 or total_time > 0:
+        total_fines = user_data.get("total_fines", 0)
+        
+        if total_count > 0 or total_time > 0 or total_fines > 0:
             has_data = True
 
-        # 🎯 第二个代码的改进：添加重置类型列
-        # 但 user_data 中可能没有 reset_type 字段，需要处理
+        # 🎯 软重置状态检查逻辑
         reset_type = "硬重置"
-        # 可以从数据库中查询软重置状态
         if target_date:
             try:
-                # 检查是否有软重置标记
+                # 检查是否存在软重置标记行
                 soft_reset_exists = await db.execute_with_retry(
                     "检查软重置",
                     """
                     SELECT 1 FROM daily_statistics 
                     WHERE chat_id = $1 AND user_id = $2 AND record_date = $3 
-                    AND activity_name = 'soft_reset_flag' AND is_soft_reset = TRUE
+                    AND activity_name = 'soft_reset'
                     LIMIT 1
                     """,
                     chat_id,
@@ -4058,15 +4056,16 @@ async def export_and_push_csv(
             except Exception as e:
                 logger.debug(f"检查软重置状态失败: {e}")
 
+        # 构建基础行数据
         row = [
             user_data.get("user_id", "未知"),
             user_data.get("nickname", "未知用户"),
-            reset_type  # 🎯 新增重置类型列
+            reset_type
         ]
 
+        # 填充各项动态配置的活动数据
         for act in activity_limits.keys():
             activity_info = user_activities.get(act, {})
-            # 🆕 安全获取活动数据
             if not isinstance(activity_info, dict):
                 activity_info = {}
 
@@ -4076,29 +4075,30 @@ async def export_and_push_csv(
             row.append(count)
             row.append(time_str)
 
+        # 格式化通用统计数据
         total_seconds_all = int(user_data.get("total_accumulated_time", 0) or 0)
         total_time_str = MessageFormatter.format_time_for_csv(total_seconds_all)
 
         overtime_seconds = int(user_data.get("total_overtime_time", 0) or 0)
         overtime_str = MessageFormatter.format_time_for_csv(overtime_seconds)
 
-        # 🆕 安全获取工作相关字段
+        # 🆕 提取并格式化工作相关字段 (对应 database.py 中返回的 final_work_days 等)
         work_days = user_data.get("work_days", 0)
-        work_hours = int(user_data.get("work_hours", 0) or 0)
-        work_hours_str = MessageFormatter.format_time_for_csv(work_hours)
+        work_hours_seconds = int(user_data.get("work_hours", 0) or 0)
+        work_hours_str = MessageFormatter.format_time_for_csv(work_hours_seconds)
 
         row.extend([
-            total_count,  # ✅ 使用已经检查过的 total_count
+            total_count,
             total_time_str,
             user_data.get("total_fines", 0),
             user_data.get("overtime_count", 0),
             overtime_str,
-            work_days,  # 🆕 工作天数
-            work_hours_str,  # 🆕 工作时长
+            work_days,         # 写入 CSV
+            work_hours_str,    # 写入 CSV
         ])
         writer.writerow(row)
 
-    # ✅ 保留第一个代码的 no data 检查
+    # 数据空值检查
     if not has_data:
         await bot.send_message(chat_id, "⚠️ 当前群组没有数据需要导出")
         return
@@ -4118,17 +4118,15 @@ async def export_and_push_csv(
         except:
             pass
 
-        # 🎯 改进描述
         caption = (
             f"📊 群组：<b>{chat_title}</b>\n"
             f"📅 统计日期：<code>{(target_date.strftime('%Y-%m-%d') if target_date else get_beijing_time().strftime('%Y-%m-%d'))}</code>\n"
             f"⏰ 导出时间：<code>{get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
             f"{MessageFormatter.create_dashed_line()}\n"
-            f"💾 包含每个用户每日的活动统计）\n"
+            f"💾 包含每个用户每日的活动统计及工作时长\n"
         )
 
-        # ✅ 保留第一个代码的发送逻辑
-        # 先把文件发回到当前 chat（可选）
+        # 发送到请求数据的当前聊天
         try:
             csv_input_file = FSInputFile(temp_file, filename=file_name)
             await bot.send_document(
@@ -4137,9 +4135,8 @@ async def export_and_push_csv(
         except Exception as e:
             logger.warning(f"发送到当前聊天失败: {e}")
 
-        # ✅ 处理 to_admin_if_no_group 参数
+        # 如果开启了推送功能，发送到管理员频道/群组
         if to_admin_if_no_group:
-            # 使用统一的 NotificationService 推送到绑定的频道/群组/管理员
             await notification_service.send_document(
                 chat_id, FSInputFile(temp_file, filename=file_name), caption=caption
             )

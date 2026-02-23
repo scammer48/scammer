@@ -1,14 +1,16 @@
+# render.yaml
 services:
   - type: web
-    name: checkin-bot
+    name: telegram-bot
     env: docker
-    plan: free
     docker:
       dockerfile: Dockerfile
     envVars:
+      - key: BOT_TOKEN
+        value: your_bot_token_here
+      - key: DATABASE_URL
+        value: your_postgresql_url_here
+      - key: ADMIN_IDS
+        value: "8356418002,6607669683"
       - key: BOT_MODE
-        value: webhook
-      - key: LOG_LEVEL
-        value: INFO
-      - key: ENABLE_PERFORMANCE_MONITOR
-        value: "true"
+        value: "polling" # Render 免费版必须用 polling
